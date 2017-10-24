@@ -17,7 +17,7 @@ except ImportError:
     import json
 
 from bottle import get, run, static_file, debug, request, error, HTTPError, redirect
-from jinja2 import Environment, PackageLoader
+from jinja2 import Environment, PackageLoader, FileSystemLoader
 from sqlobject import sqlhub, connectionForURI, AND, OR, IN, SQLObjectNotFound
 from sqlobject.dberrors import OperationalError
 from pysolr import Solr, SolrError
@@ -28,6 +28,8 @@ import markdown
 
 from stackdump.models import Site, Badge, User
 from stackdump import settings
+
+import webbrowser
 
 # STATIC VARIABLES
 BOTTLE_ROOT = os.path.abspath(os.path.dirname(sys.argv[0]))
@@ -290,7 +292,7 @@ def index():
     context['sites'] = get_sites()
     
     context['random_questions'] = get_random_questions(count=settings.NUM_OF_RANDOM_QUESTIONS)
-    
+
     return render_template('index.html', context)
 
 # this method MUST sit above the site_index and other methods below so it
@@ -358,8 +360,8 @@ def site_index(site_key):
     except SQLObjectNotFound:
         raise HTTPError(code=404, output='No site exists with the key %s.' % site_key)
     
-    context['random_questions'] = get_random_questions(site_key=site_key, count=settings.NUM_OF_RANDOM_QUESTIONS)    
-    
+    context['random_questions'] = get_random_questions(site_key=site_key, count=settings.NUM_OF_RANDOM_QUESTIONS)
+
     return render_template('index.html', context)
 
 @get('/:site_key#[\w\.]+#/search')
@@ -403,8 +405,13 @@ def view_question(site_key, question_id, answer_id=None):
     results = solr_conn().search(query)
     if len(results) == 0:
         raise HTTPError(code=404, output='No question exists with the ID %s for the site, %s.' % (question_id, context['site'].name))
-    
+
     decode_json_fields(results)
+
+    # decode the results object and check if it is manpage result and fetch pageurl
+    [is_manpage, pageurl] = decode_json_fields_for_manpage(results)
+    print is_manpage, pageurl
+
     retrieve_users(results)
     retrieve_sites(results)
     
@@ -416,8 +423,28 @@ def view_question(site_key, question_id, answer_id=None):
     context['result'] = result
 
     context['answer_id'] = answer_id
-    
-    return render_template('question.html', context)
+
+    # if it is manpage then just render that html page
+    if is_manpage:
+        webbrowser.open(pageurl, new=0, autoraise=True)
+        idx = pageurl.rfind('/')
+        page_path = pageurl[:idx]
+        page_name = pageurl[idx+1:]
+        # prepare the render env
+        env = Environment(
+            loader=FileSystemLoader(page_path),
+            # always auto-escape.
+            autoescape=lambda template_name: True,
+            # but allow auto-escaping to be disabled explicitly within the
+            # template.
+            extensions=['jinja2.ext.autoescape']
+        )
+        # render that manpage html
+        return env.get_template(page_name).render({})
+        #return template_env().get_template("/home/nortrom/vmshare/stackdump/python/src/stackdump/templates/boot.7.html.lnk").render(None)
+    # origin route
+    else:
+        return render_template('question.html', context)
 
 @get('/:site_key#[\w\.]+#/questions/:question_id#\d+#')
 def view_question_redirect(site_key, question_id):
@@ -512,6 +539,33 @@ def get_sites():
     
     return sites
 
+
+def decode_json_fields_for_manpage(obj):
+    '''
+    check if it is a manpage searching result
+    and if it is, get the html path from dict[id]['body']
+    '''
+    if obj == None:
+        return obj
+
+    if isinstance(obj, dict):
+        objs = [obj]
+    else:
+        objs = obj
+
+    is_manpage = False
+    for o in objs:
+        for k in o.keys():
+            if k == 'question':
+                #print "question:" + o[k]
+                if o[k]['body'] == 'Linux manual page':
+                    is_manpage = True
+
+            if k == 'answers':
+                #print "answers: " + o[k]
+                pageurl = o[k][0]['body']
+    return [is_manpage, pageurl]
+
 def decode_json_fields(obj):
     '''\
     Looks for keys in obj that end in -json, decodes the corresponding value and
@@ -538,6 +592,7 @@ def decode_json_fields(obj):
                     decoded_list = [ ]
                     for j in json_value:
                         decoded_list.append(json.loads(j))
+                        #decoded_list.append(j)
                     
                     o[decoded_key] = decoded_list
                 else: # assume it is a JSON string
@@ -724,6 +779,10 @@ def perform_search(site_key=None):
     context['rows_per_page'] = rows_per_page
     context['total_pages'] =  int(math.ceil(float(results.hits) / rows_per_page))
     context['sort_by'] = sort_by
+
+    # add debug info
+    print "return context"
+    print context
     
     return context
 

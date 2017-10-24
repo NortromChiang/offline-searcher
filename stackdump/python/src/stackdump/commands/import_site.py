@@ -25,6 +25,8 @@ from pysolr import Solr, SolrError
 
 from stackdump.models import Site, Badge, User
 from stackdump import settings
+import urllib
+import random
 
 try:
     # For Python < 2.6 or people using a newer version of simplejson
@@ -494,6 +496,11 @@ class PostContentHandler(xml.sax.ContentHandler):
         if 'tags' in q:
             # parse tags into a list
             doc['tags'] = PostContentHandler.TAGS_RE.findall(q['tags'])
+
+        #print "creationDate: " + doc['creationDate']
+        #print "lastActivityDate: " + doc['lastActivityDate']
+        #print "communityOwnedDate: " + doc['communityOwnedDate']
+        #print "closedDate: " + doc['#']
         
         # serialise question to JSON (the q object has cruft we don't want)
         question_obj = { }
@@ -906,6 +913,317 @@ def import_site(xml_root, site_name, dump_date, site_desc, site_key,
     print('Time taken for site insertion into Stackdump: %f seconds.' % (timing_end - timing_start))
     print('')
 
+class MpSite:
+    """
+    used for manpages to pass information
+    """
+    def __init__(self, site_name, site_desc, site_key, dump_date, import_date, base_url):
+        self.name = site_name
+        self.desc = site_desc
+        self.key = site_key
+        self.dump_date = dump_date
+        self.import_date = import_date
+        self.base_url = base_url
+
+
+def mp_finalise_question(file_path, site, id):
+    """
+    Massages and serialises the question object so it can be inserted into
+    the search index in the form that we want.
+
+    Solr input is a dict object and it need question-json/answers-json and
+    other field so that feed solr correctly.
+    Different from stackoverflow finalise_question, what we parse from man pages
+    only contains its title and body. So in order to be compatible with the origin
+    format, some field must filling useless content.
+    Here is what we do -
+    * 1. parse the man-page and extract its title and html-body
+    * 2. generate main field solr need(question and answers)
+    * 3. generate other field solr need(page url is passed through 'body' field
+            which is used for solr search engine to load the URL)
+    * 4. serialise question and answers to JSON
+    """
+
+    # 1. parse the man-page and extract its title and html-body
+    content = urllib.urlopen(file_path).read()
+    title_list = re.findall(r"(?<=<title>).+?(?=<)", content)
+    body_content = re.findall(r"(?<=<pre>).+?(?=</pre>)", content, re.S)
+    if title_list is None or len(title_list) == 0:
+        print "failed parsing title: " + file_path
+        return None
+    if body_content is None or len(body_content) == 0:
+        print "failed parsing body: " + file_path
+        return None
+    doc = {}
+    # create the text field contents
+    search_text = title_list[0]
+    print title_list[0]
+
+    # 2. generate main field solr need(question and answers)
+    # create question
+    # body viewCount title lastEditorUserId lastActivityDate comments [] score ownerUserId creationDate favoriteCount id tags
+    question_obj = {}
+    question_obj['id'] = id
+    #question_obj['acceptedAnswerId'] = q['acceptedAnswerId'] no acceptedAnswerId
+    question_obj['creationDate'] = "2016-10-20T22:07:02.260Z"
+    question_obj['score'] = 10
+    question_obj['viewCount'] = 11
+    question_obj['body'] = "Linux manual page"
+    question_obj['ownerUserId'] = str(id)
+    question_obj['lastEditorUserId'] = "2016-10-20T22:07:02.260Z"
+    #question_obj['lastEditDate'] = q['lastEditDate'] no lastEditDate
+    question_obj['lastActivityDate'] = "2016-10-20T22:07:02.260Z"
+    #question_obj['communityOwnedDate'] = q['communityOwnedDate'] no communityOwnedDate
+    #question_obj['closedDate'] = q['closedDate'] no closedDate
+    question_obj['title'] = title_list[0][0:title_list[0].find("Linux manual page")]
+    #question_obj['tags'] = PostContentHandler.TAGS_RE.findall(q['tags']) no tag
+    question_obj['favoriteCount'] = 12
+    question_obj['comments'] = []
+
+    # create answers
+    # body title lastActivityDate comments commentCount score parentId ownerUserId creationDate favoriteCount
+    # answers_obj is a list of <answer dict>
+    answers_obj = []
+    answer_obj = {}
+    answer_obj['body'] = file_path
+    answer_obj['title'] = title_list[0]
+    answer_obj['lastActivityDate'] = "2016-10-20T22:07:02.260Z"
+    answer_obj['comments'] = []
+    answer_obj['commentCount'] = 0
+    answer_obj['score'] = 13
+    answer_obj['parentId'] = id
+    answer_obj['ownerUserId'] = id
+    answer_obj['creationDate'] = "2016-10-20T22:07:02.260Z"
+    answer_obj['favoriteCount'] = 14
+    answers_obj.append(answer_obj)
+
+    # 3. generate other field solr need
+    # (text/documentId/id/siteKey/creationDate/votes/viewCount/title/answerId/ownerUserId/
+    #   lastEditorUserId/lastActivityDate/closedDate/tags)
+    #doc['answers-json'] = file_path
+    doc['text'] = search_text
+    # map other fields to search index doc
+    # this is the ID for Solr to uniquely identify this question across all sites
+    doc['documentId'] = site.key + '-' + str(id)
+    #doc['id'] = random.randint(0, 10000) #str(q['id'])
+    doc['id'] = str(id)
+    doc['siteKey'] = site.key
+    doc['creationDate'] = "2016-10-20T22:07:02.260Z"
+    # the XML field name is score, but score is a reserved lucene keyword
+    doc['votes'] = 10
+    doc['viewCount'] = 0
+    #doc['title'] = title_list[0][0:title_list[0].find("Linux manual page")]
+    doc['title'] = title_list[0][0:title_list[0].find("Linux manual page")]
+    doc['answerId'] = 0
+    doc['ownerUserId'] = str(id)
+    doc['lastEditorUserId'] = 0
+    doc['lastActivityDate'] = "2016-10-20T22:08:02.260Z"
+    #doc['communityOwnedDate'] = "2014-06-19T21:08:37"
+    doc['closedDate'] = "2016-10-20T22:09:02.260Z"
+    doc['tags'] = "no-tag"
+
+    # 4. serialise question and answers to JSON
+    # serialise question to JSON (the q object has cruft we don't want)
+    doc['question-json'] = json.dumps(question_obj, default=PostContentHandler.json_default_handler)
+    # serialise answers to JSON
+    doc['answers-json'] = [json.dumps(a, default=PostContentHandler.json_default_handler) for a in answers_obj]
+
+    return doc
+
+def mp_commit_questions(questions, solr, commit=True):
+    """
+    Adds the given list of questions to solr.
+
+    This function will loop if a SolrError is encountered to allow the user
+    to retry the commit without having to start again from the beginning,
+    e.g. if the Solr instance stops responding.
+    """
+    while True:
+        try:
+            solr.add(questions, commit=commit)
+            break
+        except SolrError, e:
+            print('A Solr error occurred while committing questions - ')
+            traceback.print_exc(file=sys.stdout)
+            print('')
+            while True:
+                response = raw_input('Try committing the questions again? (y/n) ').lower()
+                if response not in ('y', 'n'):
+                    print("Answer either 'y' or 'n'. Answering 'n' will abort the import process.")
+                else:
+                    print('')
+                    if response == 'y':
+                        break
+                    else:
+                        raise
+        except:
+            raise
+
+def mp_commit_all_questions(path, solr, site):
+    """
+    Baisc logic is similar with PostContentHandler.commit_all_questions:
+    Add each doc(manpages) generated by mp_finalise_question into questions_to_commit list
+    and call mp_commit_questions to push all to solr
+
+    The difference is for manpages html, it need to iterate its directory rather than reading
+    all doc from xml.
+    :param path: path containing all manpage html
+    :param solr: solr object
+    :param site: MpSite object
+    :return:
+    """
+    questions_to_commit = []
+    html_list = []
+    root_path = os.path.abspath(path) + "/"
+    #print "root path: " + root_path
+
+
+    # iterate the path directory and mp_finalise_question each html
+    id = 1
+    for root, dirs, files in os.walk(root_path):
+        # print dirs
+        for mfile in files:
+            # print root + file
+            html_list.append(root + mfile)
+            # if it is html file, parse it
+            abs_file = os.path.join(root, mfile)
+            if os.path.isfile(abs_file) and mfile[-5:] == ".html":
+                try:
+                    doc = mp_finalise_question(abs_file, site, id)
+                    id = id + 1
+                    if doc is not None:
+                        questions_to_commit.append(doc)
+                except Exception, e:
+                    # could not serialise and insert this question, so ignore it
+                    print('Exception: ' + str(e))
+                    import traceback
+                    traceback.print_exc()
+                    print('Could not process the question')
+            else:
+                print "not a file: " + abs_file
+
+    # commit at the end so if cancelled, there won't be orphans in solr.
+    print ("questions_to_commit size: %d" %(len(questions_to_commit)))
+    mp_commit_questions(questions_to_commit, solr, commit=False)
+
+
+def import_manpages(html_root_path, site_name, dump_date, site_desc, site_key,
+                site_base_url, answer_yes=False):
+    """
+    import manpages to solr
+    :return:
+    """
+    print('Using the html_root path: ' + html_root_path + '\n')
+
+    if not os.path.exists(html_root_path):
+        print('The given html_root path does not exist.')
+        sys.exit(1)
+
+    # connect to the database
+    print('Connecting to the Stackdump database...')
+    conn_str = settings.DATABASE_CONN_STR
+    sqlhub.processConnection = connectionForURI(conn_str)
+    print('Connected.\n')
+
+    # ensure required tables exist
+    print("Creating tables if they don't exist...")
+    Site.createTable(ifNotExists=True)
+    Badge.createTable(ifNotExists=True)
+    User.createTable(ifNotExists=True)
+    print('Created.\n')
+
+    # connect to solr
+    print('Connecting to solr...')
+    solr = Solr(settings.SOLR_URL, assume_clean=True)
+    # pysolr doesn't try to connect until a request is made, so we'll make a ping request
+    try:
+        solr._send_request('GET', 'admin/ping')
+    except socket.error, e:
+        print('Failed to connect to solr - error was: %s' % str(e))
+        print('Aborting.')
+        sys.exit(2)
+    print('Connected.\n')
+
+    # the base URL is optional.
+    if not (site_name and site_key and site_desc and dump_date):
+        print 'Could not get all the details for the site.'
+        print 'Use command-line parameters to specify the missing details (listed as None).'
+        sys.exit(1)
+
+    # prevent importing sites with keys that clash with method names in the app,
+    # e.g. a site key of 'search' would clash with the Stackdump-wide search page.
+    if site_key in ('search', 'import', 'media', 'licenses'):
+        print 'The site key given, %s, is a reserved word in Stackdump.' % site_key
+        print 'Use the --site-key parameter to specify an alternate site key.'
+        sys.exit(2)
+
+    # confirm site details with user to make sure we don't accidentally overwrite
+    # another site.
+    if not answer_yes:
+        confirm_prompt = 'Are these details correct (answer "yes" to proceed, anything else to abort)? '
+        confirm_answer = raw_input(confirm_prompt)
+        if confirm_answer != 'yes':
+            print 'Import aborted on user request.'
+            sys.exit(3)
+
+    # rollback any uncommitted entries in solr. Uncommitted entries may occur if
+    # this import process is aborted. Solr doesn't have the concept of transactions
+    # like databases do, so without a rollback, we'll be committing the previously
+    # uncommitted entries plus the newly imported ones.
+    #
+    # This also means multiple dataproc processes cannot occur concurrently. If you
+    # do the import will be silently incomplete.
+    print('Clearing any uncommitted entries in solr...')
+    solr._update('<rollback />', waitFlush=None, waitSearcher=None)
+    print('Cleared.\n')
+
+    # start a new transaction
+    sqlhub.threadConnection = sqlhub.processConnection.transaction()
+    conn = sqlhub.threadConnection
+    timing_start = time.time()
+
+    # create a new Site
+    site = MpSite(site_name, site_desc, site_key, dump_date, datetime.now(), site_base_url)
+
+    # create a new db Site obj
+    siteDb = Site(name=site_name, desc=site_desc, key=site_key, dump_date=dump_date,
+                import_date=datetime.now(), base_url=site_base_url)
+
+    # POSTS
+    # posts are added directly to the Solr index; they are not added to the database.
+    print('[post] PARSING POSTS...')
+    #handler = PostContentHandler(solr, site)
+    mp_commit_all_questions(html_root_path, solr, site)
+    #print('%-10s Processed %d rows.' % ('[post]', handler.row_count))
+    print('[post] FINISHED PARSING POSTS.\n')
+
+    # commit transaction
+    print('COMMITTING IMPORTED DATA TO DISK...')
+    solr.commit()
+    print('FINISHED COMMITTING IMPORTED DATA TO DISK.\n')
+
+    # commit transaction
+    print('COMMITTING IMPORTED DATA TO DISK...')
+    sqlhub.threadConnection.commit(close=True)  # so we're going to go closer to the metal
+
+    cur_props = {'site': siteDb}
+    props_for_db = {}
+    for k, v in cur_props.items():
+        # if this is a reference to a FK, massage the values to fit
+        if isinstance(v, SQLObject):
+            k += 'Id'
+            v = v.id
+        # need to convert the attr names to DB column names
+        props_for_db[DefaultStyle().pythonAttrToDBColumn(k)] = v
+    conn.query(conn.sqlrepr(Insert(User.sqlmeta.table, values=props_for_db)))
+
+    # commit transaction
+    print('COMMITTING IMPORTED DATA TO DISK...')
+    sqlhub.threadConnection.commit(close=True)
+    timing_end = time.time()
+    print('Time taken for site insertion into Stackdump: %f seconds.' % (timing_end - timing_start))
+    print('')
+
 # MAIN METHOD
 if __name__ == '__main__':
     parser = OptionParser(usage='usage: %prog [options] xml_root_dir')
@@ -914,6 +1232,7 @@ if __name__ == '__main__':
     parser.add_option('-k', '--site-key', help='Key of the site (if not in sites).')
     parser.add_option('-c', '--dump-date', help='Dump date of the site.')
     parser.add_option('-u', '--base-url', help='Base URL of the site on the web.')
+    parser.add_option('-m', '--mode', help='Type of loading resources')
     parser.add_option('-Y', help='Answer yes to any confirmation questions.', dest='answer_yes', action='store_true', default=False)
 
     (cmd_options, cmd_args) = parser.parse_args()
@@ -921,7 +1240,13 @@ if __name__ == '__main__':
     if len(cmd_args) < 1:
         print('The path to the directory containing the extracted XML files is required.')
         sys.exit(1)
-
-    import_site(cmd_args[0], cmd_options.site_name, cmd_options.dump_date,
+    if cmd_options.mode == "stackoverflow":
+        import_site(cmd_args[0], cmd_options.site_name, cmd_options.dump_date,
                 cmd_options.site_desc, cmd_options.site_key,
                 cmd_options.base_url, answer_yes=cmd_options.answer_yes)
+    elif cmd_options.mode == "manpages":
+        import_manpages(cmd_args[0], cmd_options.site_name, cmd_options.dump_date,
+                    cmd_options.site_desc, cmd_options.site_key,
+                    cmd_options.base_url, answer_yes=cmd_options.answer_yes)
+    else:
+        print('The choosn mode is unknown.')
